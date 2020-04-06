@@ -57,6 +57,8 @@ PID pitchPID;
 PID rollPID;
 PID vspeedPID;
 
+MyIni _ini;
+
 Program()
 {
     Runtime.UpdateFrequency = UpdateFrequency.Once;
@@ -64,6 +66,7 @@ Program()
     pitchPID = new PID(proportionalConstant, 0, derivativeConstant, -10, 10, timeLimit);
     rollPID = new PID(proportionalConstant, 0, derivativeConstant, -10, 10, timeLimit);
 	vspeedPID = new PID(proportionalConstant, 0, derivativeConstant, -10, 10, timeLimit);
+	_ini = new MyIni();
 }
 
 void Main(string arg, UpdateType updateSource)
@@ -114,6 +117,26 @@ void Main(string arg, UpdateType updateSource)
 			assistLateral = !assistLateral;
 			break;
         default:
+			string[] storedData = Storage.Split(';');
+			if(storedData.Length == 4){
+				string dampenersString, linearString;
+				shouldAlign = storedData[0] == "1";
+				
+				dampenersString = storedData[1];
+				linearString = storedData[2];
+				
+				if(dampenersString == "0") {dampenersSetup = DampenersSetup.Off;}
+				else if (dampenersString == "1") {dampenersSetup = DampenersSetup.On;}
+				else {dampenersSetup = DampenersSetup.Cruise;}
+				
+				if(linearString == "0") {assistLinear = AssistLinear.Off;}
+				else if (linearString == "1") {assistLinear = AssistLinear.On;}
+				else if (linearString == "2") {assistLinear = AssistLinear.Reverse;}
+				else {assistLinear = AssistLinear.Forward;}
+				
+				assistLateral = storedData[3] == "1";
+			}
+			Storage = "";
             break;
     }
 
@@ -123,6 +146,23 @@ void Main(string arg, UpdateType updateSource)
         //StatusScreens();
         timeElapsed = 0;
     }
+}
+
+void Save(){
+	string dampenersString, linearString;
+	if(dampenersSetup == DampenersSetup.On) {dampenersString = "1";}
+	else if (dampenersSetup == DampenersSetup.Cruise) {dampenersString = "2";}
+	else {dampenersString = "0";}
+	
+	if(assistLinear == AssistLinear.On) {linearString = "1";}
+	else if (assistLinear == AssistLinear.Reverse) {linearString = "2";}
+	else if (assistLinear == AssistLinear.Forward) {linearString = "3";}
+	else {linearString = "0";}
+	Storage = string.Join(";",
+		shouldAlign ? "1" : "0",
+		dampenersString,
+		linearString,
+		assistLateral ? "1" : "0");
 }
 
 bool ShouldFetch(IMyTerminalBlock block)
@@ -190,12 +230,16 @@ void AlignWithGravity()
     GridTerminalSystem.GetBlocksOfType(gyros, block => block.CubeGrid == referenceBlock.CubeGrid && !block.CustomName.Contains(gyroExcludeName));
 	
 	GridTerminalSystem.GetBlocksOfType(thrusters);
-	foreach(IMyThrust thruster in thrusters){
-		thruster.Enabled = true;
-	}
 	GridTerminalSystem.GetBlocksOfType(liftThrusters, thruster => thruster.Orientation.Forward.ToString() == "Down");
 	GridTerminalSystem.GetBlocksOfType(cruiseThrusters, thruster => thruster.Orientation.Forward.ToString() == "Forward" || thruster.Orientation.Forward.ToString() == "Backward");
 	GridTerminalSystem.GetBlocksOfType(lateralThrusters, thruster => thruster.Orientation.Forward.ToString() == "Left" || thruster.Orientation.Forward.ToString() == "Right");
+	
+	if(shouldAlign){
+		foreach(IMyThrust thruster in liftThrusters){
+			thruster.Enabled = true;
+		}
+	}
+	
 	
 	if (gyros.Count == 0)
     {
@@ -341,6 +385,9 @@ void AlignWithGravity()
 			}
 		}
 	} else if(kbInput.Z < 0) {
+		foreach (IMyThrust cruiseThruster in cruiseThrusters) {
+			cruiseThruster.Enabled = true;
+		}
 		if(assistLinear == AssistLinear.On || assistLinear == AssistLinear.Forward){
 			useVerticalDampeners = true;
 			linearAngleAmount = kbInput.Z/2;
@@ -349,6 +396,9 @@ void AlignWithGravity()
 			linearAngleAmount = 0.0;
 		}
 	} else {
+		foreach (IMyThrust cruiseThruster in cruiseThrusters) {
+			cruiseThruster.Enabled = true;
+		}
 		if(assistLinear == AssistLinear.On || assistLinear == AssistLinear.Reverse){
 			useVerticalDampeners = true;
 			linearAngleAmount = kbInput.Z/2;
@@ -410,10 +460,32 @@ void AlignWithGravity()
 		dampenersStatusString = "Off";
 	}
 	
-	IMyTextSurface mesurface0 = Me.GetSurface(0);
-	mesurface0.ContentType = ContentType.TEXT_AND_IMAGE;
-	mesurface0.FontSize = 1.2F;
-	mesurface0.Alignment = VRage.Game.GUI.TextPanel.TextAlignment.CENTER;
+	// output result to custom surface, this programmable block's screen as a default
+	MyIniParseResult result;
+    if (!_ini.TryParse(Me.CustomData, out result)) {
+        throw new Exception(result.ToString());
+	}
+	string customOutputBlockName = "";
+	int customSurfaceNumber = 0;
+	customSurfaceNumber = _ini.Get("setup", "customSurfaceNumber").ToInt32(0);
+	customOutputBlockName = _ini.Get("setup", "customBlockName").ToString(Me.Name);
+	
+	IMyTextSurfaceProvider outputBlock;
+	IMyTextSurface outputSurface;
+	outputBlock	= GridTerminalSystem.GetBlockWithName(customOutputBlockName) as IMyTextSurfaceProvider;
+	
+	if(outputBlock == null){
+		outputBlock = Me;
+	}
+	if(customSurfaceNumber >= outputBlock.SurfaceCount){
+		customSurfaceNumber = 0; // make sure block has this surface
+	}
+	//outputSurface = Me.GetSurface(0);
+	outputSurface = outputBlock.GetSurface(customSurfaceNumber);
+	
+	outputSurface.ContentType = ContentType.TEXT_AND_IMAGE;
+	outputSurface.FontSize = 1.2F;
+	outputSurface.Alignment = VRage.Game.GUI.TextPanel.TextAlignment.CENTER;
 	string debugText = ""
 	//+ "lat correction:" + Math.Round((lateralAngleCorrection / Math.PI * 180), 2).ToString() + "deg"
 	//+ "\n lin correction:" + Math.Round((linearAngleCorrection / Math.PI * 180), 2).ToString() + "deg"
@@ -423,7 +495,7 @@ void AlignWithGravity()
 	+ "\n lat/lin speed: " + Math.Round(lateralSpeed,2) + " / " + Math.Round(linearSpeed,2)
 	+ "\n max lift: " + Math.Round(maxLiftG,2) + "Gs"
 	+ "\n max bank:" + Math.Round((maxAngleCalculated / Math.PI * 180), 1).ToString() + "deg at " + Math.Round(speedTresholdCalculated,1).ToString() + "m/s";
-	mesurface0.WriteText(debugText);
+	outputSurface.WriteText(debugText);
 	Echo(debugText);
 
 	//	---------------------------------------------
