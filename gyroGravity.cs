@@ -265,7 +265,8 @@ void AlignWithGravity()
 	+ "\n lat/lin speed: " + Math.Round(lateralSpeed,2) + " / " + Math.Round(linearSpeed,2)
 	+ "\n X: " + kbInput.X
 	+ "\n Y: " + kbInput.Y
-	+ "\n Z: " + kbInput.Z;
+	+ "\n Z: " + kbInput.Z
+	+ "\n Gravity: " + gravityVec.Length();
 	mesurface0.WriteText(debugText);
 	//	---------------------------------------------
 
@@ -291,7 +292,9 @@ void AlignWithGravity()
     if (shouldAlign && !canTolerate)
     {
         //do gyros
-        ApplyGyroOverride(pitchSpeed, mouseInput.Y, -rollSpeed, gyros, referenceBlock);
+		// allow some user input on pitch (looking/aiming etc)
+		double pitch = MathHelper.Clamp((pitchSpeed - mouseInput.X), -1, 1);
+        ApplyGyroOverride(pitch, mouseInput.Y, -rollSpeed, gyros, referenceBlock);
 
         overrideStatus = $"\n\n           SAFETY OVERRIDE ACTIVE"; //\nYaw : {yawSpeed}";
         
