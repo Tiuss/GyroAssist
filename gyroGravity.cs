@@ -10,29 +10,32 @@ Written by Whiplash141
 ==============================  
 */
 
+enum DampenersSetup : byte {On = 0, Cruise, Off};
+enum AssistLinear : byte {On = 0, Forward, Reverse, Off};
+
 const string gyroExcludeName = "Exclude";
 const string statusScreenName = "Alignment"; //(Optional) Name of status screen
 
 const string shipName = "\n         [SHIP NAME GOES HERE]"; //(Optional) Name of your ship
 
 bool shouldAlign = true; //If the script should attempt to stabalize by default
+AssistLinear assistLinear = AssistLinear.On; // If the grid should pitch down/up when W/S pressed
+bool assistLateral = true; // If the grid should bank left/right when A/D pressed
+DampenersSetup dampenersSetup = DampenersSetup.On;
 bool referenceOnSameGridAsProgram = true; //if true, only searches for reference blocks on
                                           //the same grid as the program block (should help with docking small vessels)
-
-const double angleTolerance = 0; //How many degrees the code will allow before it overrides user control
 
 //---PID Constants
 const double proportionalConstant = 2;
 const double derivativeConstant = .5;
-
-const double speedTreshold = 33; // max bank at this speed
-const double maxAngle = 45; // max bank angle in degrees
 
 /*  
 ====================================================  
     Don't touch anything below this <3 - Whiplash  
 ====================================================  
 */
+const double speedTreshold = 33; // max bank at this speed
+const double maxAngle = 45; // max bank angle in degrees
 
 const double updatesPerSecond = 10;
 const double timeFlashMax = .5; //in seconds  
@@ -40,12 +43,14 @@ const double timeLimit = 1 / updatesPerSecond;
 double angleRoll = 0;
 double anglePitch = 0;
 double timeElapsed = 0;
-bool canTolerate = true;
-string stableStatus = ">> Disabled <<";
 string gravityMagnitudeString;
 string overrideStatus;
 
 List<IMyGyro> gyros = new List<IMyGyro>();
+List<IMyThrust> thrusters = new List<IMyThrust>();
+List<IMyThrust> liftThrusters = new List<IMyThrust>();
+List<IMyThrust> cruiseThrusters = new List<IMyThrust>();
+List<IMyThrust> lateralThrusters = new List<IMyThrust>();
 List<IMyShipController> shipControllers = new List<IMyShipController>();
 
 PID pitchPID;
@@ -77,25 +82,37 @@ void Main(string arg, UpdateType updateSource)
             if (!shouldAlign)
             {
                 shouldAlign = true;
-                stableStatus = "<< Active >>";
             }
             else
             {
                 shouldAlign = false;
-                stableStatus = ">> Disabled <<";
             }
             break;
 
         case "on":
             shouldAlign = true;
-            stableStatus = "<< Active >>";
             break;
 
         case "off":
             shouldAlign = false;
-            stableStatus = ">> Disabled <<";
             break;
-
+			
+		case "dampeners":
+			if(dampenersSetup == DampenersSetup.On) {dampenersSetup = DampenersSetup.Cruise;}
+			else if (dampenersSetup == DampenersSetup.Cruise) {dampenersSetup = DampenersSetup.Off;}
+			else {dampenersSetup = DampenersSetup.On;}
+			break;
+			
+		case "linear":
+			if(assistLinear == AssistLinear.On) {assistLinear = AssistLinear.Reverse;}
+			else if (assistLinear == AssistLinear.Reverse) {assistLinear = AssistLinear.Forward;}
+			else if (assistLinear == AssistLinear.Forward) {assistLinear = AssistLinear.Off;}
+			else {assistLinear = AssistLinear.On;}
+			break;
+			
+		case "lateral":
+			assistLateral = !assistLateral;
+			break;
         default:
             break;
     }
@@ -103,9 +120,8 @@ void Main(string arg, UpdateType updateSource)
     if (timeElapsed >= timeLimit)
     {
         AlignWithGravity();
-        StatusScreens();
+        //StatusScreens();
         timeElapsed = 0;
-        Echo("Stabilizers on?: " + shouldAlign.ToString());
     }
 }
 
@@ -138,8 +154,15 @@ IMyShipController GetControlledShipController(List<IMyShipController> controller
         if (thisController.IsUnderControl && thisController.CanControlShip)
             return thisController;
     }
-
+	
+	if(Me.CustomData.Length > 0){
+		Echo(Me.CustomData);
+		return (IMyShipController)GridTerminalSystem.GetBlockWithName(Me.CustomData);
+		
+	}
+	
     return controllers[0];
+	
 }
 
 void AlignWithGravity()
@@ -157,24 +180,35 @@ void AlignWithGravity()
     //---Assign our reference block
     IMyShipController referenceBlock = GetControlledShipController(shipControllers);
 
-    //---Populate gyro list
+    //---Populate gyro and thruster list
     gyros.Clear();
-    GridTerminalSystem.GetBlocksOfType(gyros, block => block.CubeGrid == referenceBlock.CubeGrid && !block.CustomName.Contains(gyroExcludeName));
-
-	List<IMyThrust> thrusters = new List<IMyThrust>();
-	GridTerminalSystem.GetBlocksOfType<IMyThrust>(thrusters);
+	thrusters.Clear();
+	liftThrusters.Clear();
+	cruiseThrusters.Clear();
+	lateralThrusters.Clear();
 	
-	//List<IMyThrust> liftThrusters = thrusters.Where(thruster => thruster.GridThrustDirection == Vector3I.Down).ToList();
-	List<IMyThrust> liftThrusters = thrusters.Where(thruster => thruster.Orientation.Forward.ToString() == "Down").ToList();
-
+    GridTerminalSystem.GetBlocksOfType(gyros, block => block.CubeGrid == referenceBlock.CubeGrid && !block.CustomName.Contains(gyroExcludeName));
+	
+	GridTerminalSystem.GetBlocksOfType(thrusters);
+	foreach(IMyThrust thruster in thrusters){
+		thruster.Enabled = true;
+	}
+	GridTerminalSystem.GetBlocksOfType(liftThrusters, thruster => thruster.Orientation.Forward.ToString() == "Down");
+	GridTerminalSystem.GetBlocksOfType(cruiseThrusters, thruster => thruster.Orientation.Forward.ToString() == "Forward" || thruster.Orientation.Forward.ToString() == "Backward");
+	GridTerminalSystem.GetBlocksOfType(lateralThrusters, thruster => thruster.Orientation.Forward.ToString() == "Left" || thruster.Orientation.Forward.ToString() == "Right");
+	
 	if (gyros.Count == 0)
     {
         Echo("ERROR: No gyros found on ship");
         return;
     }
+	
+	if (liftThrusters.Count == 0)
+    {
+        Echo("ERROR: No lift thrusters found on ship");
+        return;
+    }
 
-	
-	
     //---Get gravity vector    
     var referenceOrigin = referenceBlock.GetPosition();
     var gravityVec = referenceBlock.GetNaturalGravity();
@@ -189,7 +223,6 @@ void AlignWithGravity()
             thisGyro.SetValue("Override", false);
         }
         overrideStatus = "";
-        stableStatus = ">> Disabled <<";
 
         shouldAlign = false;
 
@@ -200,7 +233,7 @@ void AlignWithGravity()
 	double maxAngleCalculated = maxAngle * Math.PI / 180;
 	double maxLiftG = 2.0;
 	double speedTresholdCalculated = speedTreshold;
-    if (liftThrusters.Count != 0) // not populated when no pilot sadly...
+    if (liftThrusters.Count != 0) 
     {
         // calculate max allowed bank angle based on available lift thrust vs ship weight
 		double totalThrust = 0;
@@ -234,9 +267,6 @@ void AlignWithGravity()
 
     anglePitch *= -1; angleRoll *= -1;
 
-    Echo("pitch angle:" + Math.Round((anglePitch / Math.PI * 180), 2).ToString() + " deg");
-    Echo("roll angle:" + Math.Round((angleRoll / Math.PI * 180), 2).ToString() + " deg");
-	
 	// some initial values
 	Vector3 kbInput = referenceBlock.MoveIndicator;
 	double lateralAngleAmount = 0;
@@ -252,6 +282,7 @@ void AlignWithGravity()
 	verticalSpeed *= VectorCompareDirection(velocity, gravityVec);
 	double vSpeed = 0.0;
 	double vSpeedClamp = 0.0;
+	bool useVerticalDampeners = false;
 	
 	// some intermediate lateral values
 	
@@ -268,7 +299,6 @@ void AlignWithGravity()
 	double targetVspeed = 0.0;
 	double verticalSpeedDifference = targetVspeed - verticalSpeed;
 	vSpeed = vspeedPID.Control(verticalSpeedDifference);
-	//vSpeedClamp = (MathHelper.Clamp(vSpeed,-100,100) +50.0)/100.0;
 	double maxAccSpeed = 5; // arbitrary value due to testing; higher is less agile, lower is unstable.
 	vSpeedClamp = (MathHelper.Clamp(vSpeed,-maxAccSpeed,maxAccSpeed*(maxLiftG-1))/maxAccSpeed + 1.0) / maxLiftG;
 	
@@ -280,17 +310,62 @@ void AlignWithGravity()
 	// right is negative, left positive
 	linearSpeed *= VectorCompareDirection(planetRelativeFwdVecNormalized, linear);
 	
-	// if no manual input present, attempt to stop the lateral velocity, else use the user input and bank
+	// handle user left/right input depending on assist and dampeners config
 	if(kbInput.X == 0){
-		
-		lateralAngleAmount = (MathHelper.Clamp(lateralSpeed,-speedTresholdCalculated,speedTresholdCalculated)) / speedTresholdCalculated; //  calculation of percentage of full bank within (-1,1)
+		if(dampenersSetup == DampenersSetup.On || dampenersSetup == DampenersSetup.Cruise) {
+			lateralAngleAmount = (MathHelper.Clamp(lateralSpeed,-speedTresholdCalculated,speedTresholdCalculated)) / speedTresholdCalculated; //  calculation of percentage of full bank within (-1,1)
+		} else {
+			lateralAngleAmount = 0.0;
+			foreach (IMyThrust lateralThruster in lateralThrusters) {
+				lateralThruster.Enabled = false;
+			}
+		}
 	} else {
-		lateralAngleAmount = kbInput.X/2;
+		if(assistLateral){
+			useVerticalDampeners = true;
+			lateralAngleAmount = kbInput.X/2;
+		} else {
+			useVerticalDampeners = false;
+			lateralAngleAmount = 0.0;
+		}
 	}
 	
-	// attempt to maintain altitude if no user vertical input & above some minimal horizontal speed value (my algorithm is too jittery at small speeds)
+	// same for linear velocity and input
+	if(kbInput.Z == 0){
+		if(dampenersSetup == DampenersSetup.On) {
+			linearAngleAmount = (MathHelper.Clamp(linearSpeed,-speedTresholdCalculated,speedTresholdCalculated)) / speedTresholdCalculated;
+		} else {
+			linearAngleAmount = 0.0;
+			foreach (IMyThrust cruiseThruster in cruiseThrusters) {
+				cruiseThruster.Enabled = false;
+			}
+		}
+	} else if(kbInput.Z < 0) {
+		if(assistLinear == AssistLinear.On || assistLinear == AssistLinear.Forward){
+			useVerticalDampeners = true;
+			linearAngleAmount = kbInput.Z/2;
+		} else {
+			useVerticalDampeners = false;
+			linearAngleAmount = 0.0;
+		}
+	} else {
+		if(assistLinear == AssistLinear.On || assistLinear == AssistLinear.Reverse){
+			useVerticalDampeners = true;
+			linearAngleAmount = kbInput.Z/2;
+		} else {
+			useVerticalDampeners = false;
+			linearAngleAmount = 0.0;
+		}
+	}
+	
+	// attempt to maintain altitude if no user input & above some minimal horizontal speed value (my algorithm is too jittery at small speeds)
 	if(kbInput.Y == 0 && liftThrusters.Count != 0 && Math.Abs(lateralSpeed) + Math.Abs(linearSpeed) > speedTresholdCalculated/5){
-		
+		useVerticalDampeners = true;		
+	} else if (kbInput.Y != 0) {
+		useVerticalDampeners = false;
+	}
+	
+	if(useVerticalDampeners) {
 		foreach (IMyThrust thruster in liftThrusters){	
 			thruster.ThrustOverridePercentage = (float)vSpeedClamp;
 		}
@@ -299,56 +374,61 @@ void AlignWithGravity()
 			thruster.ThrustOverride = 0.0f;
 		}
 	}
-	
-	if(kbInput.Z == 0){
-		
-		linearAngleAmount = (MathHelper.Clamp(linearSpeed,-speedTresholdCalculated,speedTresholdCalculated)) / speedTresholdCalculated;
-	} else {
-		linearAngleAmount=0;
-	}
 
 	// calculate the actual pitch/roll correction based on max angle possible
 	lateralAngleCorrection = lateralAngleAmount * maxAngleCalculated;
 	linearAngleCorrection = linearAngleAmount * maxAngleCalculated;
-	//angleRoll -=lateralAngleCorrection;
-	//anglePitch +=linearAngleCorrection;
 	lateralAngleCorrection = -lateralAngleCorrection + angleRoll;
 	linearAngleCorrection = linearAngleCorrection + anglePitch;
+	
     //---Get Raw Deviation angle    
-    double rawDevAngle = Math.Acos(MathHelper.Clamp(gravityVec.Dot(referenceForward) / gravityVec.Length() * 180 / Math.PI, -1, 1));
+    //double rawDevAngle = Math.Acos(MathHelper.Clamp(gravityVec.Dot(referenceForward) / gravityVec.Length() * 180 / Math.PI, -1, 1));
 
     //---Angle controller    
     double rollSpeed = rollPID.Control(lateralAngleCorrection); //Math.Round(angleRoll * proportionalConstant + (angleRoll - lastAngleRoll) / timeElapsed * derivativeConstant, 2);
     double pitchSpeed = pitchPID.Control(linearAngleCorrection); //Math.Round(anglePitch * proportionalConstant + (anglePitch - lastAnglePitch) / timeElapsed * derivativeConstant, 2);
 
 	//	---------------------------------------------
-	IMyThrust sampleThruster = liftThrusters.First();
+	// output on Programmable Block's screen
+	string lateralStatusString = "";
+	string linearStatusString = "";
+	string dampenersStatusString = "";
+	
+	if(assistLateral){lateralStatusString = "On";} else {lateralStatusString = "Off";}
+	if(assistLinear == AssistLinear.On){linearStatusString = "On";} 
+	else if(assistLinear == AssistLinear.Forward) {linearStatusString = "Forward";}
+	else if(assistLinear == AssistLinear.Reverse) {linearStatusString = "Reverse";}
+	else {linearStatusString = "Off";}
+	
+	if(dampenersSetup == DampenersSetup.On) {dampenersStatusString = "Full";}
+	else if(dampenersSetup == DampenersSetup.Cruise) {dampenersStatusString = "Cruise";}
+	else {dampenersStatusString = "Off";}
+	
+	if(!shouldAlign) {
+		lateralStatusString = "Off";
+		linearStatusString = "Off";
+		dampenersStatusString = "Off";
+	}
 	
 	IMyTextSurface mesurface0 = Me.GetSurface(0);
 	mesurface0.ContentType = ContentType.TEXT_AND_IMAGE;
 	mesurface0.FontSize = 1.2F;
 	mesurface0.Alignment = VRage.Game.GUI.TextPanel.TextAlignment.CENTER;
-	string debugText = "\n\n\n\n lat correction:" + Math.Round((lateralAngleCorrection / Math.PI * 180), 2).ToString() + "deg"
-	+ "\n lin correction:" + Math.Round((linearAngleCorrection / Math.PI * 180), 2).ToString() + "deg"
+	string debugText = ""
+	//+ "lat correction:" + Math.Round((lateralAngleCorrection / Math.PI * 180), 2).ToString() + "deg"
+	//+ "\n lin correction:" + Math.Round((linearAngleCorrection / Math.PI * 180), 2).ToString() + "deg"
+	+ "Lateral assist: " + lateralStatusString
+	+ "\n Linear assist: " + linearStatusString
+	+ "\n Dampener setup: " + dampenersStatusString
 	+ "\n lat/lin speed: " + Math.Round(lateralSpeed,2) + " / " + Math.Round(linearSpeed,2)
-	//+ "\n X: " + kbInput.X
-	//+ "\n Y: " + kbInput.Y
-	//+ "\n Z: " + kbInput.Z
-	+ "\n LiftG: " + maxLiftG
-	+ "\n MaxBank:" + Math.Round((maxAngleCalculated / Math.PI * 180), 2).ToString() + "deg at " + Math.Round(speedTresholdCalculated,2).ToString() + "m/s"
-	+ "\n lift Count: " + liftThrusters.Count;
+	+ "\n max lift: " + Math.Round(maxLiftG,2) + "Gs"
+	+ "\n max bank:" + Math.Round((maxAngleCalculated / Math.PI * 180), 1).ToString() + "deg at " + Math.Round(speedTresholdCalculated,1).ToString() + "m/s";
 	mesurface0.WriteText(debugText);
-	
+	Echo(debugText);
 
 	//	---------------------------------------------
 
     var mouseInput = referenceBlock.RotationIndicator;
-    
-    //rollSpeed = rollSpeed / gyros.Count;
-    //pitchSpeed = pitchSpeed / gyros.Count;
-
-    //---Check if we are inside our tolerances  
-    canTolerate = true;
 
     //---Set appropriate gyro override  
     if (shouldAlign)
@@ -371,103 +451,105 @@ void AlignWithGravity()
     }
     else
     {
-        //ApplyGyroOverride(-mouseInput.X, mouseInput.Y, referenceBlock.RollIndicator, gyros, referenceBlock);
         foreach (IMyGyro thisGyro in gyros)
         {
             thisGyro.SetValue("Override", false);
         }
+		foreach (IMyThrust thruster in thrusters){
+			thruster.ThrustOverride = 0.0f;
+		}
         overrideStatus = "";
     }
 }
 
-void StatusScreens()
-{
-    //---get the parts of our string  
-    double roll_deg = angleRoll / Math.PI * 180;
-    double pitch_deg = -anglePitch / Math.PI * 180;
-    string rollStatusString = AngleStatus(roll_deg);
-    string pitchStatusString = AngleStatus(pitch_deg);
+// void StatusScreens()
+// {
+    // //---get the parts of our string  
+    // double roll_deg = angleRoll / Math.PI * 180;
+    // double pitch_deg = -anglePitch / Math.PI * 180;
+    // string rollStatusString = AngleStatus(roll_deg);
+    // string pitchStatusString = AngleStatus(pitch_deg);
 
-    //---Construct our final string  
-    string statusScreenMessage = shipName
-        + "\n            Natural Gravity: " + gravityMagnitudeString
-        + "\n            Stabilizer: " + stableStatus
-        + "\n\n            Roll Angle: " + Math.Round(roll_deg, 2).ToString() + " degrees\n           " + rollStatusString
-        + "\n\n            Pitch Angle: " + Math.Round(pitch_deg, 2).ToString() + " degrees\n           " + pitchStatusString
-        + overrideStatus;
+    // //---Construct our final string  
+    // string statusScreenMessage = shipName
+        // + "\n            Natural Gravity: " + gravityMagnitudeString
+        // + "\n            Stabilizer: " + stableStatus
+        // + "\n\n            Roll Angle: " + Math.Round(roll_deg, 2).ToString() + " degrees\n           " + rollStatusString
+        // + "\n\n            Pitch Angle: " + Math.Round(pitch_deg, 2).ToString() + " degrees\n           " + pitchStatusString
+        // + overrideStatus;
 
 
-    //---Write to screens  
-    var screens = new List<IMyTerminalBlock>();
-    GridTerminalSystem.SearchBlocksOfName(statusScreenName, screens, block => block is IMyTextPanel);
+    // //---Write to screens  
+    // var screens = new List<IMyTerminalBlock>();
+    // GridTerminalSystem.SearchBlocksOfName(statusScreenName, screens, block => block is IMyTextPanel);
 
-    if (screens.Count == 0)
-        return;
+    // if (screens.Count == 0)
+        // return;
 
-    foreach (IMyTextPanel thisScreen in screens)
-    {
-        thisScreen.WritePublicText(statusScreenMessage);
-        thisScreen.ShowTextureOnScreen();
-        thisScreen.ShowPublicTextOnScreen();
-    }
+    // foreach (IMyTextPanel thisScreen in screens)
+    // {
+        // thisScreen.WritePublicText(statusScreenMessage);
+        // thisScreen.ShowTextureOnScreen();
+        // thisScreen.ShowPublicTextOnScreen();
+    // }
 
-}
+// }
 
-const string align_15 = " [-15](-)-------0----------[+15]";
-const string align_14 = " [-15]-(-)------0----------[+15]";
-const string align_12 = " [-15]--(-)-----0----------[+15]";
-const string align_10 = " [-15]---(-)----0----------[+15]";
-const string align_8 = " [-15]----(-)---0----------[+15]";
-const string align_6 = " [-15]-----(-)--0----------[+15]";
-const string align_4 = " [-15]------(-)-0----------[+15]";
-const string align_2 = " [-15]-------(-)0----------[+15]";
-const string align0 = " [-15]---------(0)---------[+15]";
-const string align2 = " [-15]----------0(-)-------[+15]";
-const string align4 = " [-15]----------0-(-)------[+15]";
-const string align6 = " [-15]----------0--(-)-----[+15]";
-const string align8 = " [-15]----------0---(-)----[+15]";
-const string align10 = " [-15]----------0----(-)---[+15]";
-const string align12 = " [-15]----------0-----(-)--[+15]";
-const string align14 = " [-15]----------0------(-)-[+15]";
-const string align15 = " [-15]----------0-------(-)[+15]";
+// const string align_15 = " [-15](-)-------0----------[+15]";
+// const string align_14 = " [-15]-(-)------0----------[+15]";
+// const string align_12 = " [-15]--(-)-----0----------[+15]";
+// const string align_10 = " [-15]---(-)----0----------[+15]";
+// const string align_8 = " [-15]----(-)---0----------[+15]";
+// const string align_6 = " [-15]-----(-)--0----------[+15]";
+// const string align_4 = " [-15]------(-)-0----------[+15]";
+// const string align_2 = " [-15]-------(-)0----------[+15]";
+// const string align0 = " [-15]---------(0)---------[+15]";
+// const string align2 = " [-15]----------0(-)-------[+15]";
+// const string align4 = " [-15]----------0-(-)------[+15]";
+// const string align6 = " [-15]----------0--(-)-----[+15]";
+// const string align8 = " [-15]----------0---(-)----[+15]";
+// const string align10 = " [-15]----------0----(-)---[+15]";
+// const string align12 = " [-15]----------0-----(-)--[+15]";
+// const string align14 = " [-15]----------0------(-)-[+15]";
+// const string align15 = " [-15]----------0-------(-)[+15]";
 
-string AngleStatus(double angle)
-{
-    if (angle > 15)
-        return align15;
-    else if (angle > 14)
-        return align14;
-    else if (angle > 12)
-        return align12;
-    else if (angle > 10)
-        return align10;
-    else if (angle > 8)
-        return align8;
-    else if (angle > 6)
-        return align6;
-    else if (angle > 4)
-        return align4;
-    else if (angle > 2)
-        return align2;
-    else if (angle > -2)
-        return align0;
-    else if (angle > -4)
-        return align_2;
-    else if (angle > -6)
-        return align_4;
-    else if (angle > -8)
-        return align_6;
-    else if (angle > -10)
-        return align_8;
-    else if (angle > -12)
-        return align_10;
-    else if (angle > -14)
-        return align_12;
-    else if (angle > -15)
-        return align_14;
-    else
-        return align_15;
-}
+// string AngleStatus(double angle)
+// {
+    // if (angle > 15)
+        // return align15;
+    // else if (angle > 14)
+        // return align14;
+    // else if (angle > 12)
+        // return align12;
+    // else if (angle > 10)
+        // return align10;
+    // else if (angle > 8)
+        // return align8;
+    // else if (angle > 6)
+        // return align6;
+    // else if (angle > 4)
+        // return align4;
+    // else if (angle > 2)
+        // return align2;
+    // else if (angle > -2)
+        // return align0;
+    // else if (angle > -4)
+        // return align_2;
+    // else if (angle > -6)
+        // return align_4;
+    // else if (angle > -8)
+        // return align_6;
+    // else if (angle > -10)
+        // return align_8;
+    // else if (angle > -12)
+        // return align_10;
+    // else if (angle > -14)
+        // return align_12;
+    // else if (angle > -15)
+        // return align_14;
+    // else
+        // return align_15;
+// }
 
 Vector3D VectorProjection(Vector3D a, Vector3D b) //proj a on b    
 {
