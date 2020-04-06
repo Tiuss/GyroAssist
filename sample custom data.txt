@@ -1,0 +1,3 @@
+[setup]
+customBlockName = Industrial Cockpit
+customSurfaceNumber = 2
