@@ -25,8 +25,8 @@ const double angleTolerance = 0; //How many degrees the code will allow before i
 const double proportionalConstant = 2;
 const double derivativeConstant = .5;
 
-const double speedTreshold = 20; // max bank at this speed
-const double maxAngle = 60; // max bank angle in degrees
+const double speedTreshold = 33; // max bank at this speed
+const double maxAngle = 45; // max bank angle in degrees
 
 /*  
 ====================================================  
@@ -50,6 +50,7 @@ List<IMyShipController> shipControllers = new List<IMyShipController>();
 
 PID pitchPID;
 PID rollPID;
+PID vspeedPID;
 
 Program()
 {
@@ -57,6 +58,7 @@ Program()
     Echo("If you can read this\nclick the 'Run' button!");
     pitchPID = new PID(proportionalConstant, 0, derivativeConstant, -10, 10, timeLimit);
     rollPID = new PID(proportionalConstant, 0, derivativeConstant, -10, 10, timeLimit);
+	vspeedPID = new PID(proportionalConstant, 0, derivativeConstant, -10, 10, timeLimit);
 }
 
 void Main(string arg, UpdateType updateSource)
@@ -159,12 +161,19 @@ void AlignWithGravity()
     gyros.Clear();
     GridTerminalSystem.GetBlocksOfType(gyros, block => block.CubeGrid == referenceBlock.CubeGrid && !block.CustomName.Contains(gyroExcludeName));
 
-    if (gyros.Count == 0)
+	List<IMyThrust> thrusters = new List<IMyThrust>();
+	GridTerminalSystem.GetBlocksOfType<IMyThrust>(thrusters);
+	
+	List<IMyThrust> liftThrusters = thrusters.Where(thruster => thruster.GridThrustDirection == Vector3I.Down).ToList();
+
+	if (gyros.Count == 0)
     {
         Echo("ERROR: No gyros found on ship");
         return;
     }
 
+	
+	
     //---Get gravity vector    
     var referenceOrigin = referenceBlock.GetPosition();
     var gravityVec = referenceBlock.GetNaturalGravity();
@@ -186,6 +195,28 @@ void AlignWithGravity()
         angleRoll = 0; angleRoll = 0;
         return;
     }
+	
+	double maxAngleCalculated = maxAngle * Math.PI / 180;
+	double maxLiftG = 2.0;
+	double speedTresholdCalculated = speedTreshold;
+    if (liftThrusters.Count != 0) // not populated when no pilot sadly...
+    {
+        // calculate max allowed bank angle based on available lift thrust vs ship weight
+		double totalThrust = 0;
+		foreach (IMyThrust thruster in liftThrusters){
+			totalThrust += thruster.MaxEffectiveThrust; 
+		}
+		double shipMass = referenceBlock.CalculateShipMass().PhysicalMass;
+		double maxLiftAcc = totalThrust/shipMass;
+		maxLiftG = maxLiftAcc/gravityVec.Length();
+		maxAngleCalculated = Math.Atan(maxLiftG-1);
+		speedTresholdCalculated = 10 * (maxLiftG-1); 
+    } else {
+		foreach (IMyThrust thruster in thrusters){
+			thruster.ThrustOverride = 0.0f;
+		}
+	}
+	
 
     //---Dir'n vectors of the reference block     
     var referenceForward = referenceBlock.WorldMatrix.Forward;
@@ -213,39 +244,72 @@ void AlignWithGravity()
 	double linearAngleCorrection = 0;
 	double lateralSpeed = 0;
 	double linearSpeed = 0;
+	double verticalSpeed =0;
 	Vector3D velocity = referenceBlock.GetShipVelocities().LinearVelocity;
+	Vector3D verticalVec = Vector3D.ProjectOnVector(ref velocity,ref gravityVec);
+	verticalSpeed = -1.0 * verticalVec.Length();
+	verticalSpeed *= VectorCompareDirection(velocity, gravityVec);
+	double vSpeed = 0.0;
+	double vSpeedClamp = 0.0;
+	double vSpeedNormalized = 0.0;
 	
-	// if no manual input present, attempt to stop the velocity, else use the user input
+	// some intermediate lateral values
+	
+	// for roll correction, I need to calculate how much% of total velocity is lateral velocity. 
+	// To do that, I project the ship velocity onto already available planet relative left vector, both which need to be normalized
+	Vector3D planetRelativeLeftVecNormalized = Vector3D.Divide(planetRelativeLeftVec,planetRelativeLeftVec.Length());
+	Vector3D lateral = Vector3D.ProjectOnVector(ref velocity,ref planetRelativeLeftVecNormalized);	
+	// I now calculate the roll amount needed, depending on lateral speed and max bank allowed, both which are editable constants
+	lateralSpeed = lateral.Length();	
+	// right is negative, left positive
+	lateralSpeed *= VectorCompareDirection(planetRelativeLeftVecNormalized, lateral);
+	
+	// some intermediate vertical lateral values
+	double targetVspeed = 0.0;
+	double verticalSpeedDifference = targetVspeed - verticalSpeed;
+	vSpeed = vspeedPID.Control(verticalSpeedDifference);
+	//vSpeedClamp = (MathHelper.Clamp(vSpeed,-100,100) +50.0)/100.0;
+	double maxAccSpeed = 5; // arbitrary value due to testing; higher is less agile, lower is unstable.
+	vSpeedClamp = (MathHelper.Clamp(vSpeed,-maxAccSpeed,maxAccSpeed*(maxLiftG-1))/maxAccSpeed + 1.0) / maxLiftG;
+	
+	// some intermediate linear lateral values	
+	// same approach as for lateral
+	Vector3D planetRelativeFwdVecNormalized = Vector3D.Divide(planetRelativeFwdVec,planetRelativeFwdVec.Length());
+	Vector3D linear = Vector3D.ProjectOnVector(ref velocity,ref planetRelativeFwdVecNormalized);
+	linearSpeed = linear.Length();
+	// right is negative, left positive
+	linearSpeed *= VectorCompareDirection(planetRelativeFwdVecNormalized, linear);
+	
+	// if no manual input present, attempt to stop the lateral velocity, else use the user input and bank
 	if(kbInput.X == 0){
-		// for roll correction, I need to calculate how much% of total velocity is lateral velocity. 
-		// To do that, I project the ship velocity onto already available planet relative left vector, both which need to be normalized
-		Vector3D planetRelativeLeftVecNormalized = Vector3D.Divide(planetRelativeLeftVec,planetRelativeLeftVec.Length());
-		Vector3D lateral = Vector3D.ProjectOnVector(ref velocity,ref planetRelativeLeftVecNormalized);
 		
-		// I now calculate the roll amount needed, depending on lateral speed and max bank allowed, both which are editable constants
-		lateralSpeed = lateral.Length();	
-		// right is negative, left positive
-		lateralSpeed *= VectorCompareDirection(planetRelativeLeftVecNormalized, lateral);
-		lateralAngleAmount = (MathHelper.Clamp(lateralSpeed,-speedTreshold,speedTreshold)) / speedTreshold; //  calculation of percentage of full bank within (-1,1)
+		lateralAngleAmount = (MathHelper.Clamp(lateralSpeed,-speedTresholdCalculated,speedTresholdCalculated)) / speedTresholdCalculated; //  calculation of percentage of full bank within (-1,1)
 	} else {
 		lateralAngleAmount = kbInput.X/2;
 	}
-	if(kbInput.Z == 0){
-		Vector3D planetRelativeFwdVecNormalized = Vector3D.Divide(planetRelativeFwdVec,planetRelativeFwdVec.Length());
-		Vector3D linear = Vector3D.ProjectOnVector(ref velocity,ref planetRelativeFwdVecNormalized);
 	
-		linearSpeed = linear.Length();
-		// right is negative, left positive
+	// attempt to maintain altitude if no user vertical input & above some minimal value (my algorithm is too jittery at small speeds)
+	if(kbInput.Y == 0 && liftThrusters.Count != 0 && Math.Abs(lateralSpeed) + Math.Abs(linearSpeed) > speedTresholdCalculated/5){
 		
-		linearSpeed *= VectorCompareDirection(planetRelativeFwdVecNormalized, linear);
-		linearAngleAmount = (MathHelper.Clamp(linearSpeed,-speedTreshold,speedTreshold)) / speedTreshold;
+		foreach (IMyThrust thruster in liftThrusters){	
+			thruster.ThrustOverridePercentage = (float)vSpeedClamp;
+		}
+	} else {
+		foreach (IMyThrust thruster in liftThrusters){
+			thruster.ThrustOverride = 0.0f;
+		}
+	}
+	
+	if(kbInput.Z == 0){
+		
+		linearAngleAmount = (MathHelper.Clamp(linearSpeed,-speedTresholdCalculated,speedTresholdCalculated)) / speedTresholdCalculated;
 	} else {
 		linearAngleAmount=0;
 	}
 
 	// calculate the actual pitch/roll correction based on max angle possible
-	lateralAngleCorrection = lateralAngleAmount * ((maxAngle/180)* Math.PI);
-	linearAngleCorrection = linearAngleAmount * ((maxAngle/180)* Math.PI);
+	lateralAngleCorrection = lateralAngleAmount * maxAngleCalculated;
+	linearAngleCorrection = linearAngleAmount * maxAngleCalculated;
 	angleRoll -=lateralAngleCorrection;
 	anglePitch +=linearAngleCorrection;
     //---Get Raw Deviation angle    
@@ -263,10 +327,16 @@ void AlignWithGravity()
 	string debugText = "\n\n\n\n lat correction:" + Math.Round((lateralAngleCorrection / Math.PI * 180), 2).ToString() + "deg"
 	+ "\n lin correction:" + Math.Round((linearAngleCorrection / Math.PI * 180), 2).ToString() + "deg"
 	+ "\n lat/lin speed: " + Math.Round(lateralSpeed,2) + " / " + Math.Round(linearSpeed,2)
-	+ "\n X: " + kbInput.X
-	+ "\n Y: " + kbInput.Y
-	+ "\n Z: " + kbInput.Z
-	+ "\n Gravity: " + gravityVec.Length();
+	//+ "\n X: " + kbInput.X
+	//+ "\n Y: " + kbInput.Y
+	//+ "\n Z: " + kbInput.Z
+	+ "\n LiftG: " + maxLiftG
+	//+ "\n Atan: " + maxAngleCalculated
+	//+ "\n maxAngleCalc:" + Math.Round((maxAngleCalculated / Math.PI * 180), 2).ToString() + "deg"
+	+ "\n vspeedPid: " + Math.Round(vSpeed,5).ToString()
+	+ "\n speedThC: " + Math.Round(speedTresholdCalculated,5).ToString()
+	+ "\n vspeedClamp: " + Math.Round(vSpeedClamp,5).ToString();
+	//+ "\n lift Count: " + liftThrusters.Count;
 	mesurface0.WriteText(debugText);
 	//	---------------------------------------------
 
