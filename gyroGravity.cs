@@ -164,7 +164,8 @@ void AlignWithGravity()
 	List<IMyThrust> thrusters = new List<IMyThrust>();
 	GridTerminalSystem.GetBlocksOfType<IMyThrust>(thrusters);
 	
-	List<IMyThrust> liftThrusters = thrusters.Where(thruster => thruster.GridThrustDirection == Vector3I.Down).ToList();
+	//List<IMyThrust> liftThrusters = thrusters.Where(thruster => thruster.GridThrustDirection == Vector3I.Down).ToList();
+	List<IMyThrust> liftThrusters = thrusters.Where(thruster => thruster.Orientation.Forward.ToString() == "Down").ToList();
 
 	if (gyros.Count == 0)
     {
@@ -236,7 +237,7 @@ void AlignWithGravity()
     Echo("pitch angle:" + Math.Round((anglePitch / Math.PI * 180), 2).ToString() + " deg");
     Echo("roll angle:" + Math.Round((angleRoll / Math.PI * 180), 2).ToString() + " deg");
 	
-	
+	// some initial values
 	Vector3 kbInput = referenceBlock.MoveIndicator;
 	double lateralAngleAmount = 0;
 	double linearAngleAmount = 0;
@@ -251,7 +252,6 @@ void AlignWithGravity()
 	verticalSpeed *= VectorCompareDirection(velocity, gravityVec);
 	double vSpeed = 0.0;
 	double vSpeedClamp = 0.0;
-	double vSpeedNormalized = 0.0;
 	
 	// some intermediate lateral values
 	
@@ -288,7 +288,7 @@ void AlignWithGravity()
 		lateralAngleAmount = kbInput.X/2;
 	}
 	
-	// attempt to maintain altitude if no user vertical input & above some minimal value (my algorithm is too jittery at small speeds)
+	// attempt to maintain altitude if no user vertical input & above some minimal horizontal speed value (my algorithm is too jittery at small speeds)
 	if(kbInput.Y == 0 && liftThrusters.Count != 0 && Math.Abs(lateralSpeed) + Math.Abs(linearSpeed) > speedTresholdCalculated/5){
 		
 		foreach (IMyThrust thruster in liftThrusters){	
@@ -310,19 +310,23 @@ void AlignWithGravity()
 	// calculate the actual pitch/roll correction based on max angle possible
 	lateralAngleCorrection = lateralAngleAmount * maxAngleCalculated;
 	linearAngleCorrection = linearAngleAmount * maxAngleCalculated;
-	angleRoll -=lateralAngleCorrection;
-	anglePitch +=linearAngleCorrection;
+	//angleRoll -=lateralAngleCorrection;
+	//anglePitch +=linearAngleCorrection;
+	lateralAngleCorrection = -lateralAngleCorrection + angleRoll;
+	linearAngleCorrection = linearAngleCorrection + anglePitch;
     //---Get Raw Deviation angle    
     double rawDevAngle = Math.Acos(MathHelper.Clamp(gravityVec.Dot(referenceForward) / gravityVec.Length() * 180 / Math.PI, -1, 1));
 
     //---Angle controller    
-    double rollSpeed = rollPID.Control(angleRoll); //Math.Round(angleRoll * proportionalConstant + (angleRoll - lastAngleRoll) / timeElapsed * derivativeConstant, 2);
-    double pitchSpeed = pitchPID.Control(anglePitch); //Math.Round(anglePitch * proportionalConstant + (anglePitch - lastAnglePitch) / timeElapsed * derivativeConstant, 2);
+    double rollSpeed = rollPID.Control(lateralAngleCorrection); //Math.Round(angleRoll * proportionalConstant + (angleRoll - lastAngleRoll) / timeElapsed * derivativeConstant, 2);
+    double pitchSpeed = pitchPID.Control(linearAngleCorrection); //Math.Round(anglePitch * proportionalConstant + (anglePitch - lastAnglePitch) / timeElapsed * derivativeConstant, 2);
 
 	//	---------------------------------------------
+	IMyThrust sampleThruster = liftThrusters.First();
+	
 	IMyTextSurface mesurface0 = Me.GetSurface(0);
 	mesurface0.ContentType = ContentType.TEXT_AND_IMAGE;
-	mesurface0.FontSize = 1.5F;
+	mesurface0.FontSize = 1.2F;
 	mesurface0.Alignment = VRage.Game.GUI.TextPanel.TextAlignment.CENTER;
 	string debugText = "\n\n\n\n lat correction:" + Math.Round((lateralAngleCorrection / Math.PI * 180), 2).ToString() + "deg"
 	+ "\n lin correction:" + Math.Round((linearAngleCorrection / Math.PI * 180), 2).ToString() + "deg"
@@ -331,13 +335,11 @@ void AlignWithGravity()
 	//+ "\n Y: " + kbInput.Y
 	//+ "\n Z: " + kbInput.Z
 	+ "\n LiftG: " + maxLiftG
-	//+ "\n Atan: " + maxAngleCalculated
-	//+ "\n maxAngleCalc:" + Math.Round((maxAngleCalculated / Math.PI * 180), 2).ToString() + "deg"
-	+ "\n vspeedPid: " + Math.Round(vSpeed,5).ToString()
-	+ "\n speedThC: " + Math.Round(speedTresholdCalculated,5).ToString()
-	+ "\n vspeedClamp: " + Math.Round(vSpeedClamp,5).ToString();
-	//+ "\n lift Count: " + liftThrusters.Count;
+	+ "\n MaxBank:" + Math.Round((maxAngleCalculated / Math.PI * 180), 2).ToString() + "deg at " + Math.Round(speedTresholdCalculated,2).ToString() + "m/s"
+	+ "\n lift Count: " + liftThrusters.Count;
 	mesurface0.WriteText(debugText);
+	
+
 	//	---------------------------------------------
 
     var mouseInput = referenceBlock.RotationIndicator;
@@ -348,41 +350,24 @@ void AlignWithGravity()
     //---Check if we are inside our tolerances  
     canTolerate = true;
 
-    if (Math.Abs(anglePitch * 180 / Math.PI) > angleTolerance)
-    {
-        canTolerate = false;
-    }
-
-    if (Math.Abs(angleRoll * 180 / Math.PI) > angleTolerance)
-    {
-        canTolerate = false;
-    }
-
     //---Set appropriate gyro override  
-    if (shouldAlign && !canTolerate)
+    if (shouldAlign)
     {
         //do gyros
 		// allow some user input on pitch (looking/aiming etc)
-		double pitch = MathHelper.Clamp((pitchSpeed - mouseInput.X), -1, 1);
-        ApplyGyroOverride(pitch, mouseInput.Y, -rollSpeed, gyros, referenceBlock);
+		// I have to reorient the pitch to include some yaw component when the ship is banked to avoid unwanted rotation (both manually & via correction)
+		// I don't speak quaternions so doing it the trigonometry way
+		//double pitch = MathHelper.Clamp((pitchSpeed - mouseInput.X), -1, 1);
+		double pitch = pitchSpeed;
+		double yaw = 0.0;
+		double roll = -rollSpeed;
+		
+		double alignedPitch = 	(Math.Cos(angleRoll) * pitch + Math.Sin(angleRoll) * yaw) + mouseInput.X;
+		double alignedYaw = 	(-Math.Sin(angleRoll) * pitch + Math.Cos(angleRoll) * yaw) + mouseInput.Y;
+		double alignedRoll = roll;
+        ApplyGyroOverride(alignedPitch, alignedYaw, alignedRoll, gyros, referenceBlock);
 
         overrideStatus = $"\n\n           SAFETY OVERRIDE ACTIVE"; //\nYaw : {yawSpeed}";
-        
-        /*timeFlash += timeElapsed;
-        if (timeFlash > timeFlashMax)
-        {
-            if (flashOn)
-            {
-                overrideStatus = "\n\n           SAFETY OVERRIDE ACTIVE";
-                flashOn = false;
-            }
-            else
-            {
-                overrideStatus = "";
-                flashOn = true;
-            }
-            timeFlash = 0;
-        }*/
     }
     else
     {
