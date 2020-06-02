@@ -33,6 +33,8 @@ bool referenceOnSameGridAsProgram = true; //if true, only searches for reference
 const double proportionalConstant = 2;
 const double derivativeConstant = .5;
 
+const double agilityConstant = 1; // increase when more gyros than usual, decrease when less; // DEFAULT 1.0
+
 /*  
 ====================================================  
     Don't touch anything below this <3 - Whiplash  
@@ -54,8 +56,6 @@ string overrideStatus;
 List<IMyGyro> gyros = new List<IMyGyro>();
 List<IMyThrust> thrusters = new List<IMyThrust>();
 List<IMyThrust> liftThrusters = new List<IMyThrust>();
-List<IMyThrust> cruiseThrusters = new List<IMyThrust>();
-List<IMyThrust> lateralThrusters = new List<IMyThrust>();
 List<IMyShipController> shipControllers = new List<IMyShipController>();
 
 PID pitchPID;
@@ -228,27 +228,12 @@ void AlignWithGravity()
     gyros.Clear();
 	thrusters.Clear();
 	liftThrusters.Clear();
-	cruiseThrusters.Clear();
-	lateralThrusters.Clear();
 	
     GridTerminalSystem.GetBlocksOfType(gyros, block => block.CubeGrid == referenceBlock.CubeGrid && !block.CustomName.Contains(gyroExcludeName));
 	GridTerminalSystem.GetBlocksOfType(thrusters);
 	thrusters = thrusters.Where(thruster => thruster.IsWorking == true).ToList();
 	liftThrusters = thrusters.Where(thruster => thruster.Orientation.Forward.ToString() == "Down").ToList();
-	cruiseThrusters = thrusters.Where(thruster => thruster.Orientation.Forward.ToString() == "Forward" || thruster.Orientation.Forward.ToString() == "Backward").ToList();
-	lateralThrusters = thrusters.Where(thruster => thruster.Orientation.Forward.ToString() == "Left" || thruster.Orientation.Forward.ToString() == "Right").ToList();
-	
-	//GridTerminalSystem.GetBlocksOfType(liftThrusters, thruster => thruster.Orientation.Forward.ToString() == "Down");
-	//GridTerminalSystem.GetBlocksOfType(cruiseThrusters, thruster => thruster.Orientation.Forward.ToString() == "Forward" || thruster.Orientation.Forward.ToString() == "Backward");
-	//GridTerminalSystem.GetBlocksOfType(lateralThrusters, thruster => thruster.Orientation.Forward.ToString() == "Left" || thruster.Orientation.Forward.ToString() == "Right");
-	
-	if(shouldAlign){
-		foreach(IMyThrust thruster in liftThrusters){
-			//thruster.Enabled = true;
-		}
-	}
-	
-	
+
 	if (gyros.Count == 0)
     {
         Echo("ERROR: No gyros found on ship");
@@ -284,24 +269,29 @@ void AlignWithGravity()
         shouldAlign = false;
 
         angleRoll = 0; angleRoll = 0;
+		Echo("ERROR: No gravity");
         return;
     }
 	
 	double maxAngleCalculated = maxAngle * Math.PI / 180;
 	double maxLiftG = 2.0;
+	double maxAccG = 1.0;
+	double maxLiftAcc = 20.0;
 	double speedTresholdCalculated = speedTreshold;
+	double totalThrust = 0;
+	double shipMass = 0;
     if (liftThrusters.Count != 0) 
     {
-        // calculate max allowed bank angle based on available lift thrust vs ship weight
-		double totalThrust = 0;
+        // calculate max allowed bank angle based on available lift thrust vs ship weight		
 		foreach (IMyThrust thruster in liftThrusters){
 			totalThrust += thruster.MaxEffectiveThrust; 
 		}
-		double shipMass = referenceBlock.CalculateShipMass().PhysicalMass;
-		double maxLiftAcc = totalThrust/shipMass;
-		maxLiftG = maxLiftAcc/gravityVec.Length();
-		maxAngleCalculated = Math.Atan(maxLiftG-1);
-		speedTresholdCalculated = 10 * (maxLiftG-1); 
+		shipMass = referenceBlock.CalculateShipMass().PhysicalMass;
+		maxLiftAcc = totalThrust/shipMass;
+		maxLiftG = maxLiftAcc/gravityVec.Length(); // max total acceleration created by engines (phrased in Gees but excluding gravity's effect, hence +1)
+		maxAccG = maxLiftG - 1; // max upwards acceleration within gravity in Gees, taking gravity into account
+		maxAngleCalculated = Math.Atan(maxLiftG);
+		speedTresholdCalculated = 10 / agilityConstant * maxLiftG; 
     } else {
 		foreach (IMyThrust thruster in thrusters){
 			thruster.ThrustOverride = 0.0f;
@@ -357,7 +347,7 @@ void AlignWithGravity()
 	double verticalSpeedDifference = targetVspeed - verticalSpeed;
 	vSpeed = vspeedPID.Control(verticalSpeedDifference);
 	double maxAccSpeed = 5; // arbitrary value due to testing; higher is less agile, lower is unstable.
-	vSpeedClamp = (MathHelper.Clamp(vSpeed,-maxAccSpeed,maxAccSpeed*(maxLiftG-1))/maxAccSpeed + 1.0) / maxLiftG;
+	vSpeedClamp = (MathHelper.Clamp(vSpeed,-maxAccSpeed,maxAccSpeed*(maxAccG))/maxAccSpeed + 1.0) / maxLiftG;
 	
 	// some intermediate linear lateral values	
 	// same approach as for lateral
@@ -373,9 +363,6 @@ void AlignWithGravity()
 			lateralAngleAmount = (MathHelper.Clamp(lateralSpeed,-speedTresholdCalculated,speedTresholdCalculated)) / speedTresholdCalculated; //  calculation of percentage of full bank within (-1,1)
 		} else {
 			lateralAngleAmount = 0.0;
-			foreach (IMyThrust lateralThruster in lateralThrusters) {
-				//lateralThruster.Enabled = false;
-			}
 		}
 	} else {
 		if(assistLateral){
@@ -393,14 +380,8 @@ void AlignWithGravity()
 			linearAngleAmount = (MathHelper.Clamp(linearSpeed,-speedTresholdCalculated,speedTresholdCalculated)) / speedTresholdCalculated;
 		} else {
 			linearAngleAmount = 0.0;
-			foreach (IMyThrust cruiseThruster in cruiseThrusters) {
-				//cruiseThruster.Enabled = false;
-			}
 		}
 	} else if(kbInput.Z < 0) {
-		foreach (IMyThrust cruiseThruster in cruiseThrusters) {
-			//cruiseThruster.Enabled = true;
-		}
 		if(assistLinear == AssistLinear.On || assistLinear == AssistLinear.Forward){
 			useVerticalDampeners = true;
 			linearAngleAmount = kbInput.Z/2;
@@ -409,9 +390,6 @@ void AlignWithGravity()
 			linearAngleAmount = 0.0;
 		}
 	} else {
-		foreach (IMyThrust cruiseThruster in cruiseThrusters) {
-			//cruiseThruster.Enabled = true;
-		}
 		if(assistLinear == AssistLinear.On || assistLinear == AssistLinear.Reverse){
 			useVerticalDampeners = true;
 			linearAngleAmount = kbInput.Z/2;
@@ -422,9 +400,10 @@ void AlignWithGravity()
 	}
 	
 	// attempt to maintain altitude if no user input & above some minimal horizontal speed value (my algorithm is too jittery at small speeds)
-	if(kbInput.Y == 0 && liftThrusters.Count != 0 && Math.Abs(lateralSpeed) + Math.Abs(linearSpeed) > speedTresholdCalculated/5){
-		useVerticalDampeners = true;		
-	} else if (kbInput.Y != 0) {
+	// if(kbInput.Y == 0 && liftThrusters.Count != 0 && Math.Abs(lateralSpeed) + Math.Abs(linearSpeed) > speedTresholdCalculated*agilityConstant/5){
+		// useVerticalDampeners = true;		
+	//} else if (kbInput.Y != 0) < speedTresholdCalculated*agilityConstant/5 ) {
+	if (kbInput.Y != 0 || Math.Abs(lateralSpeed) + Math.Abs(linearSpeed) < 2 ) {
 		useVerticalDampeners = false;
 	}
 	
@@ -444,9 +423,6 @@ void AlignWithGravity()
 	lateralAngleCorrection = -lateralAngleCorrection + angleRoll;
 	linearAngleCorrection = linearAngleCorrection + anglePitch;
 	
-    //---Get Raw Deviation angle    
-    //double rawDevAngle = Math.Acos(MathHelper.Clamp(gravityVec.Dot(referenceForward) / gravityVec.Length() * 180 / Math.PI, -1, 1));
-
     //---Angle controller    
     double rollSpeed = rollPID.Control(lateralAngleCorrection); //Math.Round(angleRoll * proportionalConstant + (angleRoll - lastAngleRoll) / timeElapsed * derivativeConstant, 2);
     double pitchSpeed = pitchPID.Control(linearAngleCorrection); //Math.Round(anglePitch * proportionalConstant + (anglePitch - lastAnglePitch) / timeElapsed * derivativeConstant, 2);
@@ -508,7 +484,7 @@ void AlignWithGravity()
 	+ "\n Linear assist: " + linearStatusString
 	+ "\n Dampener setup: " + dampenersStatusString
 	+ "\n lat/lin speed: " + Math.Round(lateralSpeed,2) + " / " + Math.Round(linearSpeed,2)
-	+ "\n max lift: " + Math.Round(maxLiftG,2) + "Gs"
+	+ "\n max lift: " + Math.Round(maxLiftG,2) + "Gs (" + Math.Round(maxLiftAcc,2) + " m/s²)" 
 	+ "\n max bank:" + Math.Round((maxAngleCalculated / Math.PI * 180), 1).ToString() + "deg at " + Math.Round(speedTresholdCalculated,1).ToString() + "m/s";
 	outputSurface.WriteText(debugText);
 	Echo(debugText);
@@ -531,7 +507,7 @@ void AlignWithGravity()
 		
 		yaw = referenceBlock.RollIndicator;
 		
-		double alignedPitch = 	(Math.Cos(angleRoll) * pitch + Math.Sin(angleRoll) * yaw) + mouseInput.X;
+		double alignedPitch = 	(Math.Cos(angleRoll) * pitch + Math.Sin(angleRoll) * yaw) - mouseInput.X;
 		double alignedYaw = 	(-Math.Sin(angleRoll) * pitch + Math.Cos(angleRoll) * yaw) + mouseInput.Y;
 		double alignedRoll = roll;
         ApplyGyroOverride(alignedPitch, alignedYaw, alignedRoll, gyros, referenceBlock);

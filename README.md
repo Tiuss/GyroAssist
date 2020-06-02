@@ -1,6 +1,9 @@
 # GyroAssist
 Gyro Assist script for Space Engineers
 
+IMPORTANT!
+Grid need to have its pivot point properly aligned ("Up" of the pivot == "Up" of the ship), otherwise the script will not work properly.
+
 Copy/Paste to programming block. It turns itself on by default.
 WASD to move forward/backward/sideways
 QE to rotate
