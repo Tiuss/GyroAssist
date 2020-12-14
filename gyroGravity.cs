@@ -5,7 +5,7 @@ Written by Whiplash141
 */
 
 /*
-Heavy modified by Matthewk88  
+Heavy modified by Tiuss 
 */
 
 /*    
@@ -38,7 +38,7 @@ const double agilityConstant = 1; // increase when more gyros than usual, decrea
 /*  
 ====================================================  
     Don't touch anything below this <3 - Whiplash  
-	Too late; had my way with this - Matthewk88
+	Too late; had my way with this - Tiuss
 ====================================================  
 */
 const double speedTreshold = 33; // max bank at this speed

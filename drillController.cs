@@ -10,6 +10,7 @@ bool cruise = false;
 bool autoDrill = false;
 bool detected = false;
 double groundDistance = 0.0;
+const double defaultCruiseSpeed = 1.2;
 float rotSpeed = 0.0f;
 
 Program()
@@ -111,8 +112,9 @@ void ControlArm()
 	GridTerminalSystem.GetBlocksOfType(suspensions);
 	
 	float speed = (float)referenceBlock.GetShipSpeed();
-	bool brakes = speed > 1.5;
-	speed = 1.4f - (float)MathHelper.Clamp(speed, 0.0, 1.4);
+	float cruiseSpeed = (float)defaultCruiseSpeed;
+	bool brakes = speed > (cruiseSpeed);
+	speed = cruiseSpeed - (float)MathHelper.Clamp(speed, 0.0, cruiseSpeed);
 	
 	
 	foreach (IMyMotorSuspension suspension in suspensions){		
