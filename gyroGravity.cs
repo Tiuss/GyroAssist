@@ -25,6 +25,7 @@ const string shipName = "\n         [SHIP NAME GOES HERE]"; //(Optional) Name of
 bool shouldAlign = true; //If the script should attempt to stabalize by default
 AssistLinear assistLinear = AssistLinear.On; // If the grid should pitch down/up when W/S pressed
 bool assistLateral = true; // If the grid should bank left/right when A/D pressed
+bool autopilot = true; // travel towards specified gps
 DampenersSetup dampenersSetup = DampenersSetup.On;
 bool referenceOnSameGridAsProgram = true; //if true, only searches for reference blocks on
                                           //the same grid as the program block (should help with docking small vessels)
@@ -233,6 +234,8 @@ void AlignWithGravity()
 	GridTerminalSystem.GetBlocksOfType(thrusters);
 	thrusters = thrusters.Where(thruster => thruster.IsWorking == true).ToList();
 	liftThrusters = thrusters.Where(thruster => thruster.Orientation.Forward.ToString() == "Down").ToList();
+	IMyRemoteControl autopilotRemote = GridTerminalSystem.GetBlockWithName("Autopilot Remote Control") as IMyRemoteControl;
+	
 
 	if (gyros.Count == 0)
     {
@@ -313,6 +316,24 @@ void AlignWithGravity()
     angleRoll *= VectorCompareDirection(VectorProjection(referenceLeft, gravityVec), gravityVec); //ccw is positive 
 
     anglePitch *= -1; angleRoll *= -1;
+	
+	// autopilot overrides
+	List<Sandbox.ModAPI.Ingame.MyWaypointInfo> waypoints = new List<Sandbox.ModAPI.Ingame.MyWaypointInfo>();
+	autopilotRemote.GetWaypointInfo(waypoints);
+	Vector3D destination = waypoints.First().Coords;
+	Vector3D bodyPosition = autopilotRemote.Position;
+	Vector3D worldPosition = Vector3D.Transform(bodyPosition, autopilotRemote.WorldMatrix);
+	Vector3D direction = destination - worldPosition - gravityVec;
+	Vector3D bodyDirection = Vector3D.TransformNormal(direction, MatrixD.Transpose(autopilotRemote.WorldMatrix));
+	Vector3D localGravity = Vector3D.TransformNormal(gravityVec, MatrixD.Transpose(autopilotRemote.WorldMatrix));
+	Vector3D heightDirection = VectorProjection(bodyDirection, localGravity);
+	Vector3D flatDirection = bodyDirection - heightDirection;
+	Vector3D localForward = Vector3D.TransformNormal(planetRelativeFwdVec, MatrixD.Transpose(autopilotRemote.WorldMatrix));
+	Vector3D localLeft = Vector3D.TransformNormal(planetRelativeLeftVec, MatrixD.Transpose(autopilotRemote.WorldMatrix));
+	double heading = 0.0;
+	double elevation = 0.0;
+	heading = VectorAngleBetween(flatDirection,localForward) * VectorCompareDirection(localLeft, flatDirection); //ccw is positive ;
+	elevation = VectorAngleBetween(flatDirection,bodyDirection) * -VectorCompareDirection(localGravity, heightDirection); 
 
 	// some initial values
 	Vector3 kbInput = referenceBlock.MoveIndicator;
@@ -459,9 +480,17 @@ void AlignWithGravity()
 	customSurfaceNumber = _ini.Get("setup", "customSurfaceNumber").ToInt32(0);
 	customOutputBlockName = _ini.Get("setup", "customBlockName").ToString("");
 	
+	string debugOutputBlockName = "";
+	int debugSurfaceNumber = 0;
+	debugSurfaceNumber = _ini.Get("debug", "customSurfaceNumber").ToInt32(0);
+	debugOutputBlockName = _ini.Get("debug", "customBlockName").ToString("");
+	
 	IMyTextSurfaceProvider outputBlock;
 	IMyTextSurface outputSurface;
+	IMyTextSurfaceProvider debugBlock;
+	IMyTextSurface debugSurface;
 	outputBlock	= GridTerminalSystem.GetBlockWithName(customOutputBlockName) as IMyTextSurfaceProvider;
+	debugBlock	= GridTerminalSystem.GetBlockWithName(debugOutputBlockName) as IMyTextSurfaceProvider;
 	
 	if(outputBlock == null){
 		outputBlock = Me;
@@ -469,24 +498,45 @@ void AlignWithGravity()
 	if(customSurfaceNumber >= outputBlock.SurfaceCount){
 		customSurfaceNumber = 0; // make sure block has this surface
 	}
+	if(debugSurfaceNumber >= debugBlock.SurfaceCount){
+		debugSurfaceNumber = 0; // make sure block has this surface
+	}
 	
 	outputSurface = outputBlock.GetSurface(customSurfaceNumber);
-	
+	debugSurface = debugBlock.GetSurface(debugSurfaceNumber);
 	//IMyTextSurface outputSurface = Me.GetSurface(0);
 	
 	outputSurface.ContentType = ContentType.TEXT_AND_IMAGE;
 	outputSurface.FontSize = 1.2F;
 	outputSurface.Alignment = VRage.Game.GUI.TextPanel.TextAlignment.CENTER;
-	string debugText = ""
-	//+ "lat correction:" + Math.Round((lateralAngleCorrection / Math.PI * 180), 2).ToString() + "deg"
-	//+ "\n lin correction:" + Math.Round((linearAngleCorrection / Math.PI * 180), 2).ToString() + "deg"
+	debugSurface.ContentType = ContentType.TEXT_AND_IMAGE;
+	debugSurface.FontSize = 1.2F;
+	debugSurface.Alignment = VRage.Game.GUI.TextPanel.TextAlignment.CENTER;
+	
+	string infoText = ""
 	+ "Lateral assist: " + lateralStatusString
 	+ "\n Linear assist: " + linearStatusString
 	+ "\n Dampener setup: " + dampenersStatusString
 	+ "\n lat/lin speed: " + Math.Round(lateralSpeed,2) + " / " + Math.Round(linearSpeed,2)
 	+ "\n max lift: " + Math.Round(maxLiftG,2) + "Gs (" + Math.Round(maxLiftAcc,2) + " m/s²)" 
 	+ "\n max bank:" + Math.Round((maxAngleCalculated / Math.PI * 180), 1).ToString() + "deg at " + Math.Round(speedTresholdCalculated,1).ToString() + "m/s";
-	outputSurface.WriteText(debugText);
+	outputSurface.WriteText(infoText);
+	
+	string debugText = ""
+	+ "angle pitch: " + Math.Round(anglePitch,2)
+	//+ "\n body pos: " + PrintVector(bodyPosition)
+	//+ "\n world pos: " + PrintVector(worldPosition)
+	//+ "\n dest: " + PrintVector(destination)
+	//+ "\n dir: " + PrintVector(direction)
+	+ "\n body dir: " + PrintVector(bodyDirection)
+	+ "\n grav: " + PrintVector(localGravity)
+	+ "\n height dir: " + PrintVector(heightDirection)
+	+ "\n flat dir: " + PrintVector(flatDirection)
+	+ "\n local fwd: " + PrintVector(localForward)
+	+ "\n heading: " + PrintAngle(heading)
+	+ "\n elevation: " + PrintAngle(elevation);
+	debugSurface.WriteText(debugText);
+	
 	Echo(debugText);
 
 	//	---------------------------------------------
@@ -525,6 +575,16 @@ void AlignWithGravity()
 		}
         overrideStatus = "";
     }
+}
+
+string PrintVector(Vector3D vec)
+{
+	return "X: " + Math.Round(vec.X,2) + " Y: " + Math.Round(vec.Y,2) + " Z: " + Math.Round(vec.Z,2);
+}
+
+string PrintAngle(double angle)
+{
+	return Math.Round(angle,2) + "rad (" + Math.Round((angle / Math.PI * 180), 1).ToString() + "deg)";
 }
 
 Vector3D VectorProjection(Vector3D a, Vector3D b) //proj a on b    
