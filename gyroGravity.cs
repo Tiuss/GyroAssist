@@ -298,7 +298,7 @@
 			maxLiftG = maxLiftAcc/gravityVecLength; // max total acceleration created by engines (phrased in Gees)
 			maxAccG = maxLiftG - 1; // max upwards acceleration within gravity in Gees, taking gravity into account
 			maxAngleCalculated = Math.Atan(maxLiftG/MathHelper.Sqrt2); // Sqrt2  because max angle happens with full bank & full tilt. 
-			maxLinG = Math.Sqrt(maxLiftG*maxLiftG-1); // Pythagorean - max linear (extra) acceleration on a single axis
+			maxLinG = Math.Sqrt(maxLiftG*maxLiftG-1); // Pythagorean - max linear (extra) acceleration on a single axis // WRONG FORMULA TODO!
 			speedTresholdCalculated = 10 / agilityConstant * maxLiftG; // magic number but works
 		} else {
 			foreach (IMyThrust thruster in thrusters){
